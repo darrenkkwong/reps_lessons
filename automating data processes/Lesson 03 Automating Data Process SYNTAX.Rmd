@@ -1,0 +1,167 @@
+---
+title: "R_Training_Lesson_3"
+author: "Darren Kwong"
+date: "May 12, 2017"
+output: html_document
+---
+
+## Description
+This lesson focuses on soft-coding and automating processes. In our work, sometimes we will need to perform the same data processes using new data files. Learning to automate these processes as much as possible can help us minimize the amount of time we spend on re-running the same tasks. 
+
+This lesson is adapted from a CUNY Tutor Corps application validation process. Every semester, CUNY Tutor Corps needs its tutor applications validated. They need to know whether students meet eligibility requirements. Students must meet a minimum of 3.0 GPA and have the proper documents to work in the United States. REPS supports this process by checking that data in CUNY First (ADW).
+
+CUNY Tutor Corps provides the raw data to us, which they collect using a Formstack application that they designed. We receive the data and submit the data for EMPLID matching. Once we receive the match results, we prepare a lookup ID table in the match database. Then we pull that lookup ID table and update our student apps information and prepare syntax that queries CUNY First data for eligibility information. Finally, we finish by updating the Excel spreadsheet with eligibility information.
+
+## Import libraries and set working directory
+We import libraries and set working directory. Rather than hard code the working directory, the code is interactive. It prompts a window where the user can choose the folder that will be set as the working directory. This is possible thanks to the base code, "choose.dir()". In order to speed up the process, we can even select the default folder that should be opened. So...if you know that the working directory will always be in your project folder, then you can set the project folder as the default folder.
+
+```{r import library, eval=FALSE}
+library(plyr)
+library(dplyr)
+library(RODBC)
+library(svDialogs)
+library(ROracle)
+library(openxlsx)
+
+working_directory <- choose.dir(default = "J:\\Research\\!Projects\\TRAIN -- REPS Training and PD\\R", caption= "Select working directory folder")
+setwd(working_directory)
+```
+
+## Pull data from Excel Extract into R
+This block of code pulls data from an Excel Extract into R. Rather than hard code the pathway for the Excel File, we can ask the user to choose it. Using the R base function, "choose.files()", a window will open. The user will be able to choose the file via the window. Notice that soft coding doesn't take extra lines of code, but it will save us time in the future.
+
+```{r data pull, eval=FALSE}
+df_formstack_app <- read.xlsx(choose.files(default=getwd(),caption= "Select Formstack Excel file", multi= FALSE),detectDates=TRUE)
+```
+
+## Prepare application data for match request
+Taking what we learned from Lesson 2 on DPLYR, we recode and change the data, so that it is ready for a match request.
+
+```{r, eval=FALSE}
+df_mtch_d_stdnt_data <- select(df_formstack_app, one_of(c("Unique.ID", "EMPLID", "Name.(Last)", "Name.(First)", "Date.of.Birth", "Preferred.Phone.Number", "CUNY.Email.Address")))
+df_mtch_d_stdnt_data = df_mtch_d_stdnt_data %>% rename(EXT_ID=Unique.ID, LAST_NAME=`Name.(Last)`, FIRST_NAME=`Name.(First)`, DOB=Date.of.Birth, PHONE=Preferred.Phone.Number, EMAIL=CUNY.Email.Address)
+df_mtch_d_stdnt_data = df_mtch_d_stdnt_data %>% mutate(OSIS="", OIRA="", SSN="",ADDRESS="",ZIP="")
+df_mtch_d_stdnt_data = df_mtch_d_stdnt_data %>% select(EXT_ID, OSIS, OIRA, EMPLID, SSN, LAST_NAME, FIRST_NAME, DOB, ADDRESS, ZIP, PHONE, EMAIL)
+df_mtch_d_stdnt_data$EMPLID <- as.character(df_mtch_d_stdnt_data$EMPLID)
+df_mtch_d_stdnt_data$DOB <- as.Date(df_mtch_d_stdnt_data$DOB, origin="1899-12-30")
+df_mtch_d_stdnt_data$PHONE <- gsub("[[:punct:]]", "", df_mtch_d_stdnt_data$PHONE)
+df_mtch_d_stdnt_data$PHONE <- gsub(" ", "", df_mtch_d_stdnt_data$PHONE)
+```
+
+## Create match table and match request
+Once we create the data, we need to create the MS Access DB that our data team will use for the match request. Of course, we can export the data as a csv or txt file and then import it into the MS Access DB, but that takes time. Alternatively, we can do all of that here in this next code block.
+
+Using the function, "dir.create()", we can create a new folder where the match request should be located. Then we use the function, "file.copy()" to copy the MS Access DB template and paste it into our newly created folder. Finally, we directly write our Match table into the MS Access DB.
+
+In order to write into the MS Access DB, we need establish the MS Access path, establish a connection with the DB, and then use sqlSave() function to append directly into the MTCH_D_STDNT_DATA table. sqlSave() is part of the "RODBC" package.
+
+```{r, eval=FALSE}
+
+today <- Sys.Date()
+today <- format(today, format="%Y%m%d")
+
+new_match_folder_path <- paste0("J:/Research/!Projects/TRAIN -- REPS Training and PD/R/Lesson 03 Automating Data Processes/Sample Match Requests/Sample match DBs go here/tutor_sample_request_",today)
+dir.create(new_match_folder_path)
+new_match_access_db_path <- paste0(new_match_folder_path,"/","tutor_adw_",today,".accdb")
+file.copy(from="J:\\Research\\!Projects\\MATCH -- REPS Data Matching\\!Data\\!Template\\output_template_YYYYMMDD.accdb", to=new_match_access_db_path,overwrite= TRUE)
+
+channel <- odbcDriverConnect(paste0("Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=", new_match_access_db_path))
+sqlSave(channel, df_mtch_d_stdnt_data, append=TRUE, tablename="MTCH_D_STDNT_DATA", rownames=FALSE)
+close(channel)
+```
+
+## Prepare SQL query for ADW
+As part of the process after we receive the match results, we run a few post-match queries. Then, we create an lookup ID table (called l_id) in the Access DB. We will not review the post-match queries for the purposes of this exercise. We will go straight into importing the results from the l_id table.
+
+In order to pull the data from MS Access DB, we use the "RODBC" package once again. This time, we use the sqlQuery() function. We have to query the information that we need from the DB.
+
+```{r, eval=FALSE}
+finished_match_db_path = choose.files(default="J:\\Research\\!Projects\\TRAIN -- REPS Training and PD\\R\\Lesson 03 Automating Data Processes\\Sample Match Requests\\!Sample Finished Match\\*.*", caption="Choose match DB file.")
+channel <- odbcDriverConnect(paste0("Driver={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=", finished_match_db_path))
+sql_l_id = "SELECT * from l_id;"
+df_l_id = sqlQuery(channel, sql_l_id)
+close(channel)
+
+df_formstack_app$EMPLID <- df_l_id$valid_id[match(df_formstack_app$Unique.ID, df_l_id$EXT_ID)]
+list_of_emplids <- df_formstack_app$EMPLID
+assign("list_of_emplids_02", paste(shQuote(list_of_emplids, type = "csh"), collapse=", "))
+
+validation_sql <- paste0("
+SELECT term.emplid 
+,   term.cum_gpa
+,   term.academic_load
+,   term.tot_taken_prgrss
+,   term.acad_plan
+,   term.descr_aplan
+,   term.degree
+,   l_semester.sem_desc
+,   cit.country
+,   cit.citizenship_status
+,   cit2.descr
+FROM stg_reps.reps_cf_enrl_term term 
+INNER JOIN (
+  SELECT term.emplid, MAX(term.strm) strm
+  FROM stg_reps.reps_cf_enrl_term term
+  GROUP BY term.emplid
+  HAVING term.emplid in (",list_of_emplids_02,")) max_strm
+ON max_strm.strm = term.strm AND term.emplid=max_strm.emplid 
+LEFT OUTER JOIN stg_reps.l_semester
+ON max_strm.strm = l_semester.sem_strm
+LEFT OUTER JOIN erp.cf_citizenship@pdadw cit
+ON cit.emplid=term.emplid
+LEFT OUTER JOIN erp.cf_citizen_sts_tbl@pdadw cit2
+ON cit2.country=cit.country and cit2.citizenship_status=cit.citizenship_status
+WHERE cit.country='USA'")
+
+```
+
+## Pull data from ADW via STG_REPS
+With our query in hand, we use STG_REPS to query for CUNY First data. Rather than having to open Toad for Oracle separately, we can query the data straight from R. We use the "ROracle" package for that.
+
+In this block of code, we use the package called, "svDialogs". This package opens a dialog box that asks the user for the STG_REPS username and password. This is another important step to saving time while ensuring data security. Rather than hard coding the password or changing an empty username and password field manually, we ask the user directly via the dialog box. We remove the username and password after we have made our query, so no information is kept.
+
+
+As a note, the interactive input in the R base package is the function called, "readline()". However, I'm not a big fan of this function. If we run a block of code, readline() does not always stop and wait for user input when you are working in the script file. It will keep running the code and takes the next line of code as the input. svDialogs does not have this pitfall. It will stop and wait for user input. On other times, the interaction must be done in the R Console, which means the user will not have a direct prompt for user input. I've commented out code in this code block that you can run that demonstrates this issue.
+
+```{r, eval=FALSE}
+drv <- dbDriver("Oracle")
+host <- "xdc2-scan.cuny.edu"
+port <- 1521
+service_name <- 'tdIRETL'
+connect.string <- paste(
+  "(DESCRIPTION=",
+  "(ADDRESS=(PROTOCOL=tcp)(HOST=", host, ")(PORT=", port, "))",
+  "(CONNECT_DATA=(SERVICE_NAME=", service_name, ")))", sep = "")
+stg_reps_username <- dlgInput(message="Enter your STG_REPS username", default="")$res
+stg_reps_password <- dlgInput(message="Enter your STG_REPS password", default="")$res
+stgreps_connection <- dbConnect(drv, stg_reps_username, stg_reps_password, dbname=connect.string)
+df_stgreps_results <- dbGetQuery(stgreps_connection, validation_sql)
+df_stgreps_results$EMPLID <- as.integer(df_stgreps_results$EMPLID)
+df_student_merged_full <- left_join(df_formstack_app, df_stgreps_results, by="EMPLID")
+remove(stg_reps_username, stg_reps_password)
+
+#If you want to see how readline() runs through code, then run the next few lines
+# number_input <- as.integer(readline("Enter a number: "))
+# squared_number <- number_input * number_input
+# print(squared_number)
+```
+
+## Calculate new fields
+We are creating new fields here. For more information, refer to Lesson 2 on the DPLYR package.
+
+```{r, eval=FALSE}
+df_student_merged_full <- rename(df_student_merged_full, last_enrolled_semester=SEM_DESC)
+df_student_merged_full <- df_student_merged_full %>% mutate(Has_Min_GPA=if_else(CUM_GPA>=3, 'Yes', if_else(CUM_GPA==3,'N/A','No')))
+citizen_set= c('Native', 'Permanent Resident', 'Resident', 'Naturalized', 'Naturaliz.', 'Employment Visa', 'Work Visa')
+df_student_merged_full <- df_student_merged_full %>% mutate(Has_work_docs=if_else(DESCR %in% citizen_set, 'Yes', 'No'))
+df_student_merged_full <- df_student_merged_full %>% mutate(Eligible=if_else((Has_Min_GPA=='Yes')&(Has_work_docs=='Yes'),'Yes',if_else(Has_Min_GPA=='N/A','N/A','No')))
+```
+
+## Export results
+```{r, eval=FALSE}
+library(xlsx)
+today <- Sys.Date()
+today <- format(today, format="%Y%m%d")
+student_merged_full_name <- paste0("Sample results go here\\tutor_app_validated_sample_",today,".xlsx")
+write.xlsx(df_student_merged_full, file=student_merged_full_name, row.names=FALSE)
+```
