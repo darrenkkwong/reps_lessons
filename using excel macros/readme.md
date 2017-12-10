@@ -1,3 +1,5 @@
+# Using Excel Macros
+
 In this lesson, I show how we can combine R and Excel macros to automate common reporting procedures that we conduct at REPS. There are files.
 
 1. The R Markdown file provides all of the script and explanation for the lesson.
